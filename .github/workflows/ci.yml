@@ -1,0 +1,106 @@
+name: CI Security Scans
+
+on:
+  push:
+    branches: [ "**" ]
+  pull_request:
+    branches: [ "**" ]
+
+jobs:
+  security:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Cache Maven dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2
+          key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
+
+      - name: Build application
+        run: mvn clean compile
+
+      - name: Run SpotBugs (SAST)
+        run: mvn com.github.spotbugs:spotbugs-maven-plugin:4.7.3.6:spotbugs
+        continue-on-error: true
+
+      - name: Install Snyk CLI
+        run: |
+          npm install -g snyk
+          snyk --version
+
+      - name: Authenticate Snyk
+        run: snyk auth ${{ secrets.SNYK_TOKEN }}
+
+      - name: Run Snyk Test (SCA) - JSON Report
+        run: |
+          snyk test --file=pom.xml --json > snyk-test-report.json || true
+        continue-on-error: true
+
+      - name: Run Snyk Test (SCA) - HTML Report
+        run: |
+          snyk test --file=pom.xml --json | snyk-to-html -o snyk-test-report.html || true
+        continue-on-error: true
+
+      - name: Run Snyk Test (SCA) - SARIF Report
+        run: |
+          snyk test --file=pom.xml --sarif > snyk-test-report.sarif || true
+        continue-on-error: true
+
+      - name: Install snyk-to-html
+        run: npm install -g snyk-to-html
+        if: always()
+
+      - name: Generate HTML Report (fallback)
+        run: |
+          if [ -f snyk-test-report.json ]; then
+            snyk-to-html -i snyk-test-report.json -o snyk-test-report.html
+          fi
+        continue-on-error: true
+        if: always()
+
+      - name: Run Snyk Monitor (Optional - sends to Snyk dashboard)
+        run: |
+          snyk monitor --file=pom.xml --project-name=${{ github.repository }}
+        continue-on-error: true
+
+      - name: Create reports directory
+        run: mkdir -p reports
+        if: always()
+
+      - name: Move reports to directory
+        run: |
+          [ -f snyk-test-report.json ] && mv snyk-test-report.json reports/ || echo "No JSON report"
+          [ -f snyk-test-report.html ] && mv snyk-test-report.html reports/ || echo "No HTML report"
+          [ -f snyk-test-report.sarif ] && mv snyk-test-report.sarif reports/ || echo "No SARIF report"
+        if: always()
+
+      - name: Upload SpotBugs Report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: spotbugs-report
+          path: target/spotbugsXml.xml
+
+      - name: Upload Snyk Reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: snyk-reports
+          path: reports/
+
+      - name: Upload SARIF to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: reports/snyk-test-report.sarif
+        continue-on-error: true
